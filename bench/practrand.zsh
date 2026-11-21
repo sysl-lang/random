@@ -7,12 +7,12 @@
 # <outdir>/practrand-<name>.txt.
 set -e
 rng_test=$1
-out=$2
 limit=${3:-4GB}
 root=$PWD
-mkdir -p $out
+mkdir -p $2
+out=${2:A}
 cd bench/sysl
-sysl build --release -O3 --cpu native --lib $root -o $root/$out/sysl-bench .
+sysl build --release -O3 --cpu native --lib $root -o $out/sysl-bench .
 cd $root
 
 for gen in splitmix64 xoshiro256pp xoshiro256ss pcg64dxsm chacha8 chacha12 chacha20 philox4x32 mt19937 mt19937_64; do

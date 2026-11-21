@@ -217,6 +217,36 @@ chacha_ref_stream_seven()
     same_bytes(keystream[12](rfc_key(), 7), hex_bytes(CHACHA12_S7))
     same_bytes(keystream[20](rfc_key(), 7), hex_bytes(CHACHA20_S7))
 
+// The RFC-pinned core is the oracle for the generator's layout: stream 7 above leaves word 15 zero,
+// so a stream with its high half set is what says word 15 is the stream's top 32 bits.
+@test("a stream number's high half lands in word 15, and a block counter past 2^32 carries")
+chacha_layout_high_words()
+    val stream = u64(0x0123_4567) << 32 | 7
+    var g = ChaCha20.keyed(rfc_key(), stream)
+    var input: [16]u32 = [0x61707865, 0x3320646e, 0x79622d32, 0x6b206574, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7, 0x01234567]
+
+    for i in 0..<8
+        input[4 + i] = 0x03020100 + 0x04040404 * u32(i)
+
+    val x = chacha_core[20](input)
+
+    assert_eq(g.next_u64(), u64(x[0]) | u64(x[1]) << 32)
+
+    // Block 2^32: counter words [0, 1].
+    var far = ChaCha20.keyed(rfc_key(), stream)
+
+    far.input[12] = 0xffffffff
+
+    for i in 0..<8
+        far.next_u64()
+
+    input[13] = 1
+
+    val y = chacha_core[20](input)
+
+    assert_eq(far.next_u64(), u64(y[0]) | u64(y[1]) << 32)
+    assert_eq(far.block_counter, (u64(1) << 32) + 1)
+
 @test("split is the same key on another stream, from block zero")
 chacha_split()
     var g = ChaCha20.keyed(rfc_key(), 0)

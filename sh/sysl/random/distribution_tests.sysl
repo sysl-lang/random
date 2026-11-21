@@ -166,6 +166,7 @@ normal_shape()
     var in2 = 0
     var in3 = 0
     var beyond_r = 0
+    var beyond_low = 0
     var positive = 0
 
     for i in 0..<n
@@ -178,6 +179,7 @@ normal_shape()
         if x.abs() < 2.0 then in2 += 1
         if x.abs() < 3.0 then in3 += 1
         if x.abs() > ZIG_NORM_R then beyond_r += 1
+        if x < -ZIG_NORM_R then beyond_low += 1
         if x > 0.0 then positive += 1
 
     val mean = sum / real(n)
@@ -194,8 +196,24 @@ normal_shape()
     // about as often as it should.
     assert(beyond_r > 50)
     assert(beyond_r < 170)
+
+    // And on both sides: the tail sampler takes its sign from u.
+    assert(beyond_low > 15)
+    assert(beyond_r - beyond_low > 15)
     assert(positive > 198000)
     assert(positive < 202000)
+
+// The fast path pinned exactly: the low byte picks the layer, the top 53 bits the position, and
+// u = k * 2^-52 - 1 spans [-1, 1). A draw with k = 3 * 2^50 is u = -0.25; k = 3 * 2^51 is u = 0.5.
+@test("a fast-path draw maps to exactly u * x[layer], from the bits the layout says")
+ziggurat_fast_path_is_exact()
+    var a = Fixed(0x6000000000000005)
+    var b = Fixed(0xc000000000000007)
+    var e = Fixed(0x8000000000000009)
+
+    assert(a.normal() == -0.25 * ZIG_NORM_X[5])
+    assert(b.normal() == 0.5 * ZIG_NORM_X[7])
+    assert(e.exponential() == 0.5 * ZIG_EXP_X[9])
 
 @test("normal is the same stream on every generator that gives the same words")
 normal_is_a_function_of_the_words()
