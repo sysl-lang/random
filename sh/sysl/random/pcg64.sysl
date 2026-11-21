@@ -1,0 +1,84 @@
+module sh.sysl.random
+@no_alloc
+
+/** The 64-bit "cheap" multiplier of PCG64 DXSM: a 128-bit state stepped by a multiplier that fits in
+ * one machine word, so a step is three multiplies rather than four.
+ */
+private const CHEAP: u64 = 0xda942042e4dd58b5
+
+/** PCG64 DXSM (M. E. O'Neill's PCG family; the DXSM output function and cheap-multiplier step as NumPy
+ * ships them in `PCG64DXSM`, and as O'Neill's C++ `pcg_engines::cm_setseq_dxsm_128_64`).
+ *
+ * A 128-bit linear congruential state with an odd increment that selects one of 2^127 streams, and an
+ * output function -- double xorshift multiply -- applied to the state **before** it steps, so the
+ * multiply of the step and the multiplies of the output do not wait on each other.
+ *
+ * `state` and `inc` are the two numbers NumPy's `bit_generator.state` shows, so a generator here and a
+ * `PCG64DXSM` there set to the same pair produce the same stream.
+ */
+struct Pcg64Dxsm
+    state: u128
+    inc: u128
+
+    /** NumPy's seeding (`pcg64_set_seed`): the increment made odd from `stream`, the state stepped,
+     * the seed added, and stepped again -- so a seed of zero is not a special case. **The two seeding
+     * steps use PCG64's full 128-bit multiplier, not the cheap one**, because that is what NumPy does:
+     * `PCG64DXSM` shares `PCG64`'s seeding. `seeded(s, i)` with the two numbers NumPy's
+     * `SeedSequence(n).generate_state(4)` gives is `PCG64DXSM(n)`.
+     */
+    seeded(seed: u128, stream: u128) -> Pcg64Dxsm
+        val full: u128 = 0x2360ed051fc65da44385df649fccf645
+        var g = Pcg64Dxsm(0, stream << 1 | 1)
+
+        g.state = g.state *% full +% g.inc
+        g.state +%= seed
+        g.state = g.state *% full +% g.inc
+        g
+
+    /** Jump `delta` steps ahead in O(log delta) multiplies (F. Brown, *Random Number Generation with
+     * Arbitrary Strides*, 1994): the affine step is squared and accumulated bit by bit. Two
+     * generators on one stream `delta` apart are the cheap way to hand each thread its own segment.
+     */
+    advance(*self, delta: u128)
+        var mult = u128(CHEAP)
+        var plus = self.inc
+        var acc_mult: u128 = 1
+        var acc_plus: u128 = 0
+        var d = delta
+
+        while d > 0
+            if d & 1 == 1
+                acc_mult *%= mult
+                acc_plus = acc_plus *% mult +% plus
+
+            plus = (mult +% 1) *% plus
+            mult *%= mult
+            d >>= 1
+
+        self.state = acc_mult *% self.state +% acc_plus
+    end advance
+
+    /** A generator for another thread, on stream `stream`, seeded from two draws of this one.
+     *
+     * The child takes a **fresh state** as well as its own increment. Keeping this generator's state
+     * would not do: DXSM reads its output from the state *before* stepping, so two generators that
+     * share a state and differ only in increment answer the same first word.
+     */
+    split(*self, stream: u128) -> Pcg64Dxsm =
+        Pcg64Dxsm.seeded(u128(self.next_u64()) << 64 | u128(self.next_u64()), stream)
+
+    private step(*self)
+        self.state = self.state *% u128(CHEAP) +% self.inc
+end Pcg64Dxsm
+
+impl Rng for Pcg64Dxsm
+    next_u64(*self) -> u64
+        var hi = u64(self.state >> 64)
+        val lo = u64.wrap(self.state) | 1
+
+        hi ^= hi >> 32
+        hi *%= CHEAP
+        hi ^= hi >> 48
+        hi *%= lo
+        self.step()
+        hi

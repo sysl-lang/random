@@ -1,0 +1,183 @@
+module sh.sysl.random
+@no_alloc
+
+/** MT19937, the 32-bit Mersenne Twister (M. Matsumoto and T. Nishimura, *Mersenne Twister: A
+ * 623-dimensionally equidistributed uniform pseudorandom number generator*, ACM TOMACS 8(1), 1998),
+ * as `mt19937ar.c` writes it and as C++'s `std::mt19937`, Python's `random` and NumPy's `MT19937`
+ * reproduce it.
+ *
+ * **It is here for compatibility, not as a default.** A program that must reproduce a stream another
+ * language drew -- a simulation published with its seed, a test fixture made in Python -- needs this
+ * exact generator. Anything new should take xoshiro256++ or PCG64 DXSM: the Twister's 624-word (2.5 KB)
+ * state is a linear recurrence over GF(2), so it fails the linear-complexity and matrix-rank tests
+ * (TestU01's LinearComp and MatrixRank) that its successors pass, and it recovers slowly from a state
+ * that is mostly zeros.
+ */
+struct Mt19937
+    mt: [624]u32
+    at: usize
+
+    /** `init_genrand`: the state from one 32-bit seed. `seeded(5489)` is `std::mt19937`'s default. */
+    seeded(seed: u32) -> Mt19937
+        var g = Mt19937([0; 624], 624)
+
+        g.mt[0] = seed
+
+        for i in 1..<624
+            val p = g.mt[i - 1]
+
+            g.mt[i] = 1812433253 *% (p ^ p >> 30) +% u32(i)
+
+        g
+
+    /** `init_by_array`: the state from a key of any length, the authors' recommended seeding. */
+    from_key(key: []const u32) -> Mt19937
+        var g = Mt19937.seeded(19650218)
+        var i: usize = 1
+        var j: usize = 0
+        var k = if key.len > 624 then key.len else 624
+
+        while k > 0
+            val p = g.mt[i - 1]
+
+            g.mt[i] = (g.mt[i] ^ (p ^ p >> 30) *% 1664525) +% key[j] +% u32(j)
+            i += 1
+            j += 1
+
+            if i >= 624
+                g.mt[0] = g.mt[623]
+                i = 1
+
+            if j >= key.len then j = 0
+
+            k -= 1
+
+        k = 623
+
+        while k > 0
+            val p = g.mt[i - 1]
+
+            g.mt[i] = (g.mt[i] ^ (p ^ p >> 30) *% 1566083941) -% u32(i)
+            i += 1
+
+            if i >= 624
+                g.mt[0] = g.mt[623]
+                i = 1
+
+            k -= 1
+
+        g.mt[0] = 0x80000000
+        g
+    end from_key
+
+    /** The next 32 bits: the twist when the block is used up, then the tempering. */
+    draw(*self) -> u32
+        if self.at >= 624 then self.twist()
+
+        var y = self.mt[self.at]
+
+        self.at += 1
+        y ^= y >> 11
+        y ^= y << 7 & 0x9d2c5680
+        y ^= y << 15 & 0xefc60000
+        y ^ y >> 18
+
+    /** All 624 words regenerated at once, the reference's three loops in one: word `i` from its upper
+     * bit, the next word's lower 31, and the word 397 on, wrapping at the end.
+     */
+    private twist(*self)
+        for i in 0..<624
+            val x = self.mt[i] & 0x80000000 | self.mt[(i + 1) % 624] & 0x7fffffff
+
+            self.mt[i] = self.mt[(i + 397) % 624] ^ x >> 1 ^ (0 -% (x & 1)) & 0x9908b0df
+
+        self.at = 0
+end Mt19937
+
+impl Rng for Mt19937
+    /** Two draws, the first taken as the high half. */
+    next_u64(*self) -> u64 = u64(self.draw()) << 32 | u64(self.draw())
+
+    override next_u32(*self) -> u32 = self.draw()
+
+/** MT19937-64 (T. Nishimura, *Tables of 64-bit Mersenne Twisters*, ACM TOMACS 10(4), 2000), as
+ * `mt19937-64.c` writes it and as C++'s `std::mt19937_64` reproduces it. The same caveats as
+ * `Mt19937`: it is here to reproduce streams, not to be chosen.
+ */
+struct Mt19937_64
+    mt: [312]u64
+    at: usize
+
+    /** `init_genrand64`: the state from one seed. `seeded(5489)` is `std::mt19937_64`'s default. */
+    seeded(seed: u64) -> Mt19937_64
+        var g = Mt19937_64([0; 312], 312)
+
+        g.mt[0] = seed
+
+        for i in 1..<312
+            val p = g.mt[i - 1]
+
+            g.mt[i] = 6364136223846793005 *% (p ^ p >> 62) +% u64(i)
+
+        g
+
+    /** `init_by_array64`: the state from a key of any length. */
+    from_key(key: []const u64) -> Mt19937_64
+        var g = Mt19937_64.seeded(19650218)
+        var i: usize = 1
+        var j: usize = 0
+        var k = if key.len > 312 then key.len else 312
+
+        while k > 0
+            val p = g.mt[i - 1]
+
+            g.mt[i] = (g.mt[i] ^ (p ^ p >> 62) *% 3935559000370003845) +% key[j] +% u64(j)
+            i += 1
+            j += 1
+
+            if i >= 312
+                g.mt[0] = g.mt[311]
+                i = 1
+
+            if j >= key.len then j = 0
+
+            k -= 1
+
+        k = 311
+
+        while k > 0
+            val p = g.mt[i - 1]
+
+            g.mt[i] = (g.mt[i] ^ (p ^ p >> 62) *% 2862933555777941757) -% u64(i)
+            i += 1
+
+            if i >= 312
+                g.mt[0] = g.mt[311]
+                i = 1
+
+            k -= 1
+
+        g.mt[0] = 1 << 63
+        g
+    end from_key
+
+    private twist(*self)
+        for i in 0..<312
+            val x = self.mt[i] & 0xffffffff80000000 | self.mt[(i + 1) % 312] & 0x7fffffff
+
+            self.mt[i] = self.mt[(i + 156) % 312] ^ x >> 1 ^ (0 -% (x & 1)) & 0xb5026f5aa96619e9
+
+        self.at = 0
+end Mt19937_64
+
+impl Rng for Mt19937_64
+    next_u64(*self) -> u64
+        if self.at >= 312 then self.twist()
+
+        var x = self.mt[self.at]
+
+        self.at += 1
+        x ^= x >> 29 & 0x5555555555555555
+        x ^= x << 17 & 0x71d67fffeda60000
+        x ^= x << 37 & 0xfff7eee000000000
+        x ^ x >> 43

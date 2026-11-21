@@ -1,0 +1,20 @@
+// 0.14.0 (gap). A ziggurat's tables are exp and ln of a recurrence: a natural `const` function. But
+// `real.exp()` and `real.ln()` are the C library's, and a `const` function may not call them
+// (reference/declarations.md § A `const` function runs while compiling: "Two things are left out on
+// purpose: the C library's floating-point mathematics"):
+//
+//     sysl run findings/const_exp.sysl
+//     error: 'tail' is 'const', so it runs while compiling, and it calls 'real.exp', which calls
+//     'sysl.sys.sysl_exp', which is the C library's 'exp' — its last bit differs between C libraries,
+//     and the board's would not agree with this compiler's
+//
+// What it would take: a correctly rounded exp/ln (CORE-MATH-style) that both the compiler and every
+// target agree on. Workaround taken: tools/ziggurat_tables.c generates ziggurat_tables.sysl.
+
+import sysl.math.Float
+
+const tail(x: real) -> real = x.exp()
+
+static val T: real = tail(1.0)
+
+print(T)

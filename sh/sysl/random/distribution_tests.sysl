@@ -1,0 +1,402 @@
+module sh.sysl.random
+@tests
+@requires(heap)
+@requires(os)
+
+import sysl.math.Float
+import sysl.threads.scope
+
+// What the distributions claim, asserted with fixed seeds and generous bands: deterministic, so they
+// cannot flake, and wide enough that only a real defect -- a bias, a wrong table, a dropped tail --
+// lands outside them.
+
+/** A generator answering one fixed word, for the tests that need to know exactly what was drawn. */
+private struct Fixed
+    v: u64
+
+impl Rng for Fixed
+    next_u64(*self) -> u64 = self.v
+
+/** A generator answering a fixed list in turn. */
+private struct Script
+    words: [4]u64
+    at: usize
+
+impl Rng for Script
+    next_u64(*self) -> u64
+        val w = self.words[self.at]
+
+        self.at = (self.at + 1) % 4
+        w
+
+// -- below ----------------------------------------------------------------------------------------
+
+@test("below a power of two is exactly the draw's top bits: no rejection, no other mixing")
+below_power_of_two()
+    var a = SplitMix64(5)
+    var b = SplitMix64(5)
+
+    for k in 1..<64
+        assert_eq(a.below(u64(1) << u64(k)), b.next_u64() >> u64(64 - k))
+
+@test("below stays inside its bound, and the degenerate bounds answer what they must")
+below_in_range()
+    var g = Xoshiro256pp.seeded(7)
+
+    for i in 0..<2000
+        assert(g.below(6) < 6)
+        assert(g.below(1_000_000_007) < 1_000_000_007)
+
+    for i in 0..<20
+        assert_eq(g.below(1), 0)
+
+    assert_eq(g.below(0), 0)
+
+    // The bound with the most rejection there is: just under half of all draws are refused, and what
+    // is kept must still be uniform, so the top half of [0, n) gets half the answers.
+    val n = (u64(1) << 63) + 1
+    var high = 0
+
+    for i in 0..<4000
+        val v = g.below(n)
+
+        assert(v < n)
+
+        if v >= u64(1) << 62 then high += 1
+
+    assert(high > 1850)
+    assert(high < 2150)
+
+    var top = 0
+
+    for i in 0..<1000
+        if g.below(u64::Max) == u64::Max - 1 then top += 1
+
+    assert(top < 3)
+
+@test("Lemire's rejection fires exactly when the low half falls under 2^64 mod n")
+below_rejects_the_unfair_part()
+    // n = 3: 2^64 mod 3 = 1, so the only draw refused is the one whose product's low half is 0 --
+    // the draw 0 itself. The script's two zeros are both refused and the third word answers; its
+    // product's low half is exactly 1, the threshold, which is kept.
+    var g = Script([0, 0, 0xaaaaaaaaaaaaaaab, 9], 0)
+
+    assert_eq(g.below(3), u64((u128(0xaaaaaaaaaaaaaaab) * 3) >> 64))
+
+    // A low half of exactly n is the fast path: kept without computing the threshold.
+    var f = Fixed(0)
+
+    assert_eq(f.below(1), 0)
+
+@test("below is uniform, not merely in range")
+below_unbiased()
+    for seed in 0..<3
+        var g = Pcg64Dxsm.seeded(u128(seed), 0)
+        var counts: []int = [0; 6]
+
+        for i in 0..<60000
+            counts[g.below(6)] += 1
+
+        for c in counts
+            assert(c > 9500)
+            assert(c < 10500)
+
+@test("a range is half-open, the whole i64 span included, and an empty one answers its start")
+range_half_open()
+    var g = ChaCha8.seeded(4)
+
+    for i in 0..<500
+        val v = g.range(-5, 5)
+
+        assert(v >= -5)
+        assert(v < 5)
+
+    var neg = 0
+
+    for i in 0..<1000
+        if g.range(i64::Min, i64::Max) < 0 then neg += 1
+
+    assert(neg > 420)
+    assert(neg < 580)
+    assert_eq(g.range(3, 3), 3)
+    assert_eq(g.range(3, 1), 3)
+
+// -- floats ---------------------------------------------------------------------------------------
+
+@test("unit is in [0, 1): the all-ones draw is 1 - 2^-53 and the zero draw is 0")
+unit_edges()
+    var ones = Fixed(u64::Max)
+    var zero = Fixed(0)
+
+    assert(ones.unit() < 1.0)
+    assert(ones.unit() == 1.0 - 0x1.0p-53)
+    assert(zero.unit() == 0.0)
+    assert(ones.unit_f32() < 1.0f32)
+    assert(zero.unit_open_low() == 0x1.0p-53)
+    assert(ones.unit_open_low() == 1.0)
+
+@test("unit's mean and variance are a uniform's, 1/2 and 1/12")
+unit_moments()
+    var g = Philox4x32.keyed(3)
+    var sum = 0.0
+    var sq = 0.0
+    val n = 100000
+
+    for i in 0..<n
+        val u = g.unit()
+
+        sum += u
+        sq += u * u
+
+    val mean = sum / real(n)
+    val variance = sq / real(n) - mean * mean
+
+    assert((mean - 0.5).abs() < 0.005)
+    assert((variance - 1.0 / 12.0).abs() < 0.002)
+
+// -- normal ---------------------------------------------------------------------------------------
+
+@test("normal has mean 0, variance 1, and a standard normal's mass within 1, 2 and 3 sigma")
+normal_shape()
+    var g = Xoshiro256pp.seeded(2024)
+    val n = 400000
+    var sum = 0.0
+    var sq = 0.0
+    var in1 = 0
+    var in2 = 0
+    var in3 = 0
+    var beyond_r = 0
+    var positive = 0
+
+    for i in 0..<n
+        val x = g.normal()
+
+        sum += x
+        sq += x * x
+
+        if x.abs() < 1.0 then in1 += 1
+        if x.abs() < 2.0 then in2 += 1
+        if x.abs() < 3.0 then in3 += 1
+        if x.abs() > ZIG_NORM_R then beyond_r += 1
+        if x > 0.0 then positive += 1
+
+    val mean = sum / real(n)
+
+    assert(mean.abs() < 0.01)
+    assert((sq / real(n) - mean * mean - 1.0).abs() < 0.01)
+
+    // 0.682689, 0.954500, 0.997300 of the mass; the bands are about five standard errors.
+    assert((real(in1) / real(n) - 0.682689).abs() < 0.004)
+    assert((real(in2) / real(n) - 0.954500).abs() < 0.002)
+    assert((real(in3) / real(n) - 0.997300).abs() < 0.0005)
+
+    // Beyond R is 2.58e-4 of the mass, about 103 draws: the tail method has to have run, and run
+    // about as often as it should.
+    assert(beyond_r > 50)
+    assert(beyond_r < 170)
+    assert(positive > 198000)
+    assert(positive < 202000)
+
+@test("normal is the same stream on every generator that gives the same words")
+normal_is_a_function_of_the_words()
+    var a = Pcg64Dxsm.seeded(11, 1)
+    var b = Pcg64Dxsm.seeded(11, 1)
+
+    for i in 0..<1000
+        assert(a.normal() == ziggurat_normal(&b))
+
+@test("the ziggurat tables join up: the edges fall, the densities rise, and both ends are fixed")
+ziggurat_tables_are_consistent()
+    for i in 1..<256
+        assert(ZIG_NORM_X[i + 1] < ZIG_NORM_X[i])
+        assert(ZIG_NORM_F[i + 1] > ZIG_NORM_F[i])
+        assert(ZIG_EXP_X[i + 1] < ZIG_EXP_X[i])
+        assert(ZIG_EXP_F[i + 1] > ZIG_EXP_F[i])
+
+    assert(ZIG_NORM_X[1] == ZIG_NORM_R)
+    assert(ZIG_EXP_X[1] == ZIG_EXP_R)
+    assert(ZIG_NORM_X[256] == 0.0)
+    assert(ZIG_NORM_F[256] == 1.0)
+    assert(ZIG_EXP_F[256] == 1.0)
+
+    // Every layer has the same area: x[i] * (f[i+1] - f[i]) is V, the base layer's area, for all i.
+    for i in 1..<255
+        assert((ZIG_NORM_X[i] * (ZIG_NORM_F[i + 1] - ZIG_NORM_F[i]) - 0.00492867323399).abs() < 1e-9)
+        assert((ZIG_EXP_X[i] * (ZIG_EXP_F[i + 1] - ZIG_EXP_F[i]) - 0.0039496598225815571993).abs() < 1e-9)
+
+// -- exponential ----------------------------------------------------------------------------------
+
+@test("exponential has mean 1, variance 1, and P(x > t) = e^-t")
+exponential_shape()
+    var g = Xoshiro256ss.seeded(77)
+    val n = 400000
+    var sum = 0.0
+    var sq = 0.0
+    var over1 = 0
+    var over3 = 0
+    var beyond_r = 0
+
+    for i in 0..<n
+        val x = g.exponential()
+
+        assert(x >= 0.0)
+        sum += x
+        sq += x * x
+
+        if x > 1.0 then over1 += 1
+        if x > 3.0 then over3 += 1
+        if x > ZIG_EXP_R then beyond_r += 1
+
+    val mean = sum / real(n)
+
+    assert((mean - 1.0).abs() < 0.01)
+    assert((sq / real(n) - mean * mean - 1.0).abs() < 0.03)
+    assert((real(over1) / real(n) - 0.367879).abs() < 0.004)
+    assert((real(over3) / real(n) - 0.049787).abs() < 0.002)
+
+    // e^-7.697 is 4.54e-4 of the mass, about 182 draws.
+    assert(beyond_r > 110)
+    assert(beyond_r < 260)
+
+// -- shuffle and fill -----------------------------------------------------------------------------
+
+@test("a shuffle of three is each of the six orders about equally often")
+shuffle_uniform()
+    var g = SplitMix64(31)
+    var counts: []int = [0; 6]
+
+    for t in 0..<60000
+        var xs = [0, 1, 2]
+
+        g.shuffle(xs[..])
+
+        // The order, numbered 0..5 by where 0 and 1 landed.
+        val code = xs[0] * 2 + (if xs[1] > xs[2] then 1 else 0)
+
+        counts[code] += 1
+
+    for c in counts
+        assert(c > 9500)
+        assert(c < 10500)
+
+@test("shuffling nothing, or one thing, changes nothing, and a shuffle keeps every element")
+shuffle_short_and_permutes()
+    var g = SplitMix64(5)
+    var empty: []int = [0; 0]
+    var one = [9]
+
+    g.shuffle(empty)
+    g.shuffle(one[..])
+    assert_eq(one[0], 9)
+
+    var xs = [0; 50]
+
+    for i in 0..<50
+        xs[i] = int(i)
+
+    g.shuffle(xs[..])
+
+    var seen = [0; 50]
+
+    for x in xs
+        seen[x] += 1
+
+    for s in seen
+        assert_eq(s, 1)
+
+@test("fill writes each draw's bytes least significant first, and a short tail from one more")
+fill_bytes()
+    var g = SplitMix64(8)
+    var h = SplitMix64(8)
+    var out: [11]u8 = [0; 11]
+
+    g.fill(out[..])
+
+    val a = h.next_u64()
+    val b = h.next_u64()
+
+    for i in 0..<8
+        assert_eq(out[i], u8.wrap(a >> u64(8 * i)))
+
+    for i in 0..<3
+        assert_eq(out[8 + i], u8.wrap(b >> u64(8 * i)))
+
+@test("next_u32 is the top half of a draw, and boolean is its top bit")
+narrow_draws()
+    var f = Fixed(0x8123456789abcdef)
+
+    assert_eq(f.next_u32(), 0x81234567)
+    assert(f.boolean())
+
+    var z = Fixed(0x7fffffffffffffff)
+
+    assert(!z.boolean())
+
+// -- streams for threads --------------------------------------------------------------------------
+
+/** Sum of the first `n` draws, the work each thread does. */
+private total[G: Rng](g: G, n: int) -> u64
+    var h = g
+    var t: u64 = 0
+
+    for i in 0..<n
+        t +%= h.next_u64()
+
+    t
+
+@test("four threads on four split streams draw what the same streams draw on one thread")
+threads_on_split_streams()
+    var root = Xoshiro256pp.seeded(1)
+    val g0 = root.split()
+    val g1 = root.split()
+    val g2 = root.split()
+    val g3 = root.split()
+    var sums = [0u64; 4]
+    val out = sums[..]
+
+    scope((s) ->
+        s.spawn(() -> out[0] = total(g0, 100000))
+        s.spawn(() -> out[1] = total(g1, 100000))
+        s.spawn(() -> out[2] = total(g2, 100000))
+        s.spawn(() -> out[3] = total(g3, 100000)))
+
+    assert_eq(sums[0], total(g0, 100000))
+    assert_eq(sums[3], total(g3, 100000))
+
+    // And the four streams are different streams.
+    assert(sums[0] != sums[1])
+    assert(sums[1] != sums[2])
+    assert(sums[2] != sums[3])
+
+// DXSM outputs the state before it steps, so a child sharing the parent's state on another stream
+// would answer the parent's next word first. The split has to give it a state of its own.
+@test("a PCG64 split does not start with the word its parent was about to answer")
+pcg_split_takes_a_fresh_state()
+    for seed in 0..<50
+        var parent = Pcg64Dxsm.seeded(u128(seed), 0)
+        var shadow = parent
+        var child = parent.split(1)
+
+        assert(child.next_u64() != shadow.next_u64())
+        assert(child.inc == 3)
+
+@test("every family splits into streams that differ from the parent and from each other")
+every_family_splits()
+    var c = ChaCha12.seeded(3)
+    var c1 = c.split(1)
+    var c2 = c.split(2)
+    var p = Philox4x32.keyed(3)
+    var p1 = p.split(1)
+    var q = Pcg64Dxsm.seeded(3, 0)
+    var q1 = q.split(1)
+    var same = 0
+
+    for i in 0..<64
+        val a = c.next_u64()
+        val b = c1.next_u64()
+
+        if a == b || b == c2.next_u64() then same += 1
+        if p.next_u64() == p1.next_u64() then same += 1
+        if q.next_u64() == q1.next_u64() then same += 1
+
+    assert_eq(same, 0)

@@ -1,0 +1,53 @@
+module sh.sysl.random
+@no_alloc
+
+import sysl.math.Float
+
+/** A standard normal deviate by the ziggurat (G. Marsaglia and W. W. Tsang, *The Ziggurat Method for
+ * Generating Random Variables*, JSS 5(8), 2000), in J. A. Doornik's 256-layer form, which takes the
+ * layer and the position from **one** 64-bit draw: the low 8 bits pick the layer and the top 53 the
+ * position, so they share no bit.
+ *
+ * About 99% of draws end at the first comparison -- one draw, one multiply, one compare. The rest
+ * land on a layer's ragged edge, which is settled by the density itself, or in the base layer, whose
+ * tail beyond `R` is sampled by Marsaglia's exponential method.
+ */
+ziggurat_normal[G: Rng](g: *G) -> real
+    loop
+        val bits = g.next_u64()
+        val i = usize(bits & 0xff)
+        val u = real(bits >> 11) * 0x1.0p-52 - 1.0
+        val x = u * ZIG_NORM_X[i]
+
+        if x.abs() < ZIG_NORM_X[i + 1] then return x
+
+        if i == 0
+            var tx = 1.0
+            var ty = 0.0
+
+            while -2.0 * ty < tx * tx
+                tx = g.unit_open_low().ln() / ZIG_NORM_R
+                ty = g.unit_open_low().ln()
+
+            return if u < 0.0 then tx - ZIG_NORM_R else ZIG_NORM_R - tx
+
+        if ZIG_NORM_F[i + 1] + (ZIG_NORM_F[i] - ZIG_NORM_F[i + 1]) * g.unit() < (-0.5 * x * x).exp()
+            return x
+end ziggurat_normal
+
+/** A standard exponential deviate by the same 256-layer ziggurat over `exp(-x)`. Its tail is the
+ * distribution itself shifted by `R` -- the memorylessness that makes the exponential the easy case.
+ */
+ziggurat_exponential[G: Rng](g: *G) -> real
+    loop
+        val bits = g.next_u64()
+        val i = usize(bits & 0xff)
+        val x = real(bits >> 11) * 0x1.0p-53 * ZIG_EXP_X[i]
+
+        if x < ZIG_EXP_X[i + 1] then return x
+
+        if i == 0 then return ZIG_EXP_R - g.unit_open_low().ln()
+
+        if ZIG_EXP_F[i + 1] + (ZIG_EXP_F[i] - ZIG_EXP_F[i + 1]) * g.unit() < (-x).exp()
+            return x
+end ziggurat_exponential

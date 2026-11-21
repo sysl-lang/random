@@ -1,0 +1,16 @@
+// The sysl half of the speed comparison: every generator and sampler of `sh.sysl.random`, timed with
+// the harness bench/c/common.h uses. Built against the checkout above it:
+//
+//     sysl build --release -O3 --cpu native --lib ../.. -o random-bench .
+//
+// bench/run.zsh builds both halves and runs them; see the README's Speed section.
+
+package {
+  name    = "random-bench"
+  version = "0.1.0"
+  sysl    = "0.12.1"
+}
+
+requires {
+  os = true
+}

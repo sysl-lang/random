@@ -1,0 +1,23 @@
+module sh.sysl.random
+@no_alloc
+
+/** SplitMix64 (G. Steele, D. Lea, C. Flood, *Fast Splittable Pseudorandom Number Generators*, 2014;
+ * the constants are Vigna's `splitmix64.c`).
+ *
+ * A Weyl sequence -- the state steps by the golden-ratio constant -- passed through a 64-bit
+ * finalizer. Its period is 2^64 and every 64-bit seed is good, including zero, which is why it is the
+ * generator the xoshiro authors recommend for **filling another generator's state** from one word:
+ * `Xoshiro256pp.seeded` and friends do exactly that.
+ */
+struct SplitMix64
+    state: u64
+
+impl Rng for SplitMix64
+    next_u64(*self) -> u64
+        self.state +%= 0x9e3779b97f4a7c15
+
+        var z = self.state
+
+        z = (z ^ z >> 30) *% 0xbf58476d1ce4e5b9
+        z = (z ^ z >> 27) *% 0x94d049bb133111eb
+        z ^ z >> 31

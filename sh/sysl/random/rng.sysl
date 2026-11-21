@@ -1,0 +1,116 @@
+module sh.sysl.random
+@no_alloc
+
+import sysl.slices.swap
+
+/** Random number generation: named, checkable generators, and the distributions that are easy to
+ * get wrong, written once over every generator.
+ *
+ * **Every generator here is an algorithm with a published reference**, and `tests.sysl` pins each one
+ * against its authors' own output: SplitMix64, xoshiro256++ and xoshiro256** (Blackman and Vigna),
+ * PCG64 DXSM (O'Neill, in NumPy's form), ChaCha8/12/20 (Bernstein; RFC 8439's block function),
+ * Philox4x32 (Salmon et al., Random123) and the Mersenne Twister in both widths (Matsumoto and
+ * Nishimura). A generator that is merely shaped like one of these passes every statistical test and
+ * fails those vectors.
+ *
+ * **Only ChaCha is a source of unpredictability.** Every other generator is completely determined by
+ * a state that a handful of outputs reveal, which is what a simulation, a test and a shuffle want and
+ * what a key, a token or a nonce must not have.
+ *
+ * **Nothing here reads a clock or the operating system.** Seeding is the caller's, so the module
+ * builds for a freestanding target; `sh.sysl.random.entropy` is the one module that asks the machine.
+ */
+
+/** A generator: sixty-four fresh bits on every call, and everything else built from them.
+ *
+ * `next_u64` is the one member a generator writes. Every distribution below is a default written
+ * against it, so a new generator gets an unbiased `below`, a correct `unit` and a ziggurat normal by
+ * writing three lines -- and every generator answers each of them the same way, which is what makes
+ * one generator a drop-in for another.
+ */
+trait Rng
+    next_u64(*self) -> u64
+
+    /** Thirty-two bits, from the **top** of a draw. Generators whose low bits are the weaker ones
+     * (xoshiro256++'s lowest bits are the least mixed) are read where they are strongest.
+     */
+    next_u32(*self) -> u32 = u32(self.next_u64() >> 32)
+
+    /** One bit, from the top. */
+    boolean(*self) -> bool = self.next_u64() >> 63 == 1
+
+    /** A uniform value in `[0, n)`, with no modulo bias, by **Lemire's nearly-divisionless method**
+     * (D. Lemire, *Fast Random Integer Generation in an Interval*, ACM TOMACS 29(1), 2019).
+     *
+     * The draw is multiplied by `n` at twice the width, and the high half is the answer: it is in
+     * `[0, n)` by construction. The low half says whether this draw fell in the part of the range
+     * that `n` does not divide evenly, and only then is the threshold `2^64 mod n` computed -- so the
+     * common case is one multiply and one compare, and the division is paid for on roughly `n / 2^64`
+     * of the draws.
+     *
+     * `below(0)` answers `0`: no value lies below zero, and the product's high half is that answer
+     * without a special case.
+     */
+    below(*self, n: u64) -> u64
+        var m = u128(self.next_u64()) * u128(n)
+
+        if u64.wrap(m) < n
+            val threshold = (0 -% n) % n
+
+            while u64.wrap(m) < threshold
+                m = u128(self.next_u64()) * u128(n)
+
+        u64(m >> 64)
+
+    /** A uniform value in `[lo, hi)`, empty when `hi` is not above `lo`. The span is worked out at
+     * twice the width, where `i64::Min` to `i64::Max` is a `u64` like any other.
+     */
+    range(*self, lo: i64, hi: i64) -> i64 =
+        if hi <= lo then lo else i64(i128(lo) + i128(self.below(u64(i128(hi) - i128(lo)))))
+
+    /** A uniform `real` in `[0, 1)`, from the top **53** bits: every value is a multiple of 2^-53,
+     * every multiple is equally likely, and `1.0` never comes back.
+     */
+    unit(*self) -> real = real(self.next_u64() >> 11) * 0x1.0p-53
+
+    /** The same at `f32`, from the top 24 bits. */
+    unit_f32(*self) -> f32 = f32(self.next_u64() >> 40) * 0x1.0p-24f32
+
+    /** A uniform `real` in `(0, 1]`: the top 53 bits plus one, scaled. The interval a logarithm
+     * wants, since `0` never comes back.
+     */
+    unit_open_low(*self) -> real = real((self.next_u64() >> 11) + 1) * 0x1.0p-53
+
+    /** A standard normal deviate (mean 0, variance 1), by the 256-layer ziggurat. */
+    normal(*self) -> real = ziggurat_normal(self)
+
+    /** A standard exponential deviate (rate 1), by the 256-layer ziggurat. */
+    exponential(*self) -> real = ziggurat_exponential(self)
+
+    /** The elements rearranged, every permutation equally likely: Fisher-Yates, walking down, each
+     * index drawn by `below`.
+     */
+    shuffle[T](*self, xs: []T)
+        var i = xs.len
+
+        while i > 1
+            val j = usize(self.below(u64(i)))
+
+            i -= 1
+            swap(xs, i, j)
+
+    /** The bytes filled from successive draws, each draw's bytes least significant first. */
+    fill(*self, out: []u8)
+        var i: usize = 0
+
+        while i < out.len
+            var x = self.next_u64()
+            var k = 0
+
+            while k < 8 && i < out.len
+                out[i] = u8.wrap(x)
+                x >>= 8
+                i += 1
+                k += 1
+    end fill
+end Rng

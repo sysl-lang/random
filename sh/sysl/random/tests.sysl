@@ -1,0 +1,355 @@
+module sh.sysl.random
+@tests
+@requires(heap)
+
+// **The tests that say each generator IS the algorithm it is named for.** Every vector here is the
+// output of the authors' own code or a published known-answer file -- never of this package:
+//
+//   SplitMix64, xoshiro256++/**   Vigna's splitmix64.c, xoshiro256plusplus.c, xoshiro256starstar.c
+//   PCG64 DXSM                     NumPy 2.5's PCG64DXSM (random_raw, advance, SeedSequence(42))
+//   ChaCha20                       RFC 8439 §2.3.2 and §2.4.2
+//   ChaCha8/12/20 keystreams       Bernstein's chacha-ref.c (eSTREAM), 8, 12 and 20 rounds
+//   Philox4x32-7 and -10           Random123's tests/kat_vectors
+//   MT19937, MT19937-64            mt19937ar.out, mt19937-64.out.txt, and the C++ standard's
+//                                  [rand.predef] 10000th-output values
+//
+// A generator with the right structure and one wrong constant passes every statistical test in
+// `distribution_tests.sysl` and fails these.
+
+private check_u64s[G: Rng](g: *G, want: []const u64)
+    for w in want
+        assert_eq(g.next_u64(), w)
+
+private hex_bytes(s: string) -> [128]u8
+    var out: [128]u8 = [0; 128]
+
+    for i in 0..<s.len / 2
+        out[i] = u8(nibble(s.bytes[2 * i]) * 16 + nibble(s.bytes[2 * i + 1]))
+
+    out
+
+private nibble(c: u8) -> int = if c <= u8('9') then int(c - u8('0')) else int(c - u8('a')) + 10
+
+// -- SplitMix64 -----------------------------------------------------------------------------------
+
+@test("SplitMix64 reproduces splitmix64.c from 1234567, and from zero")
+splitmix_vector()
+    var g = SplitMix64(1234567)
+
+    check_u64s(&g, [6457827717110365317, 3203168211198807973, 9817491932198370423, 4593380528125082431, 16408922859458223821][..])
+
+    var z = SplitMix64(0)
+
+    assert_eq(z.next_u64(), 16294208416658607535)
+
+// -- xoshiro256 -----------------------------------------------------------------------------------
+
+// The vectors construct through the generic's own name, `Xoshiro256[PlusPlus](...)`. Construction
+// through the alias, `Xoshiro256pp(...)`, is refused by 0.12.1 ("cannot infer the type argument
+// 'S'"), and an ignored test still has to compile, so the pin is findings/alias_construct.sysl.
+// TODO: construct through the aliases here when that is fixed (0.13.1).
+
+@test("xoshiro256++ reproduces xoshiro256plusplus.c from [1, 2, 3, 4]")
+xoshiro_pp_vector()
+    var g = Xoshiro256[PlusPlus]([1, 2, 3, 4])
+
+    check_u64s(&g, [41943041, 58720359, 3588806011781223, 3591011842654386][..])
+
+@test("xoshiro256** reproduces xoshiro256starstar.c from [1, 2, 3, 4]")
+xoshiro_ss_vector()
+    var g = Xoshiro256[StarStar]([1, 2, 3, 4])
+
+    check_u64s(&g, [11520, 0, 1509978240, 1215971899390074240][..])
+
+@test("xoshiro256++'s jump and long_jump land where the authors' do")
+xoshiro_pp_jumps()
+    var j = Xoshiro256[PlusPlus]([1, 2, 3, 4])
+
+    j.jump()
+    check_u64s(&j, XPP_JUMP[..])
+
+    var l = Xoshiro256[PlusPlus]([1, 2, 3, 4])
+
+    l.long_jump()
+    check_u64s(&l, XPP_LONG[..])
+
+@test("xoshiro256**'s jump and long_jump land where the authors' do")
+xoshiro_ss_jumps()
+    var j = Xoshiro256[StarStar]([1, 2, 3, 4])
+
+    j.jump()
+    check_u64s(&j, XSS_JUMP[..])
+
+    var l = Xoshiro256[StarStar]([1, 2, 3, 4])
+
+    l.long_jump()
+    check_u64s(&l, XSS_LONG[..])
+
+@test("seeded fills the state with SplitMix64, as the authors recommend")
+xoshiro_seeded()
+    var p = Xoshiro256pp.seeded(42)
+    var s = Xoshiro256ss.seeded(42)
+
+    check_u64s(&p, XPP_SEED42[..])
+    check_u64s(&s, XSS_SEED42[..])
+
+@test("split hands out the stream as it stood and moves this one on by a jump")
+xoshiro_split()
+    var g = Xoshiro256pp.seeded(9)
+    var copy = g
+    var child = g.split()
+
+    for i in 0..<16
+        assert_eq(child.next_u64(), copy.next_u64())
+
+    var jumped = Xoshiro256pp.seeded(9)
+
+    jumped.jump()
+
+    for i in 0..<16
+        assert_eq(g.next_u64(), jumped.next_u64())
+
+// -- PCG64 DXSM -----------------------------------------------------------------------------------
+
+private pcg_fixture() -> Pcg64Dxsm =
+    Pcg64Dxsm(0x0123456789abcdef0011223344556677, 0x0f1e2d3c4b5a69788796a5b4c3d2e1f1)
+
+@test("PCG64 DXSM reproduces NumPy's PCG64DXSM from a set state")
+pcg_vector()
+    var g = pcg_fixture()
+
+    check_u64s(&g, [0x39b36fe73c3ff06e, 0x4b353f80d32c6430, 0xf795690d2515b939, 0x6765001329a373b9, 0x44dac0adf5b9505f][..])
+
+@test("seeded is NumPy's seeding: PCG64DXSM(42)'s state and first outputs")
+pcg_seeded()
+    var g = Pcg64Dxsm.seeded(0x9f1e2e6dcd540ab7d57873dc79fb94b6, 0x7d282a1b64d420b7336579714692d5ff)
+
+    assert(g.state == 0xcea44f6798798f2aacbc7c9d68860ac8)
+    assert(g.inc == 0xfa505436c9a8416e66caf2e28d25abff)
+    check_u64s(&g, [0xab1c50338e63481d, 0x01bdf91d548d1872, 0xa872905d0418d0a1][..])
+
+@test("advance jumps where NumPy's advance does, and where that many draws do")
+pcg_advance()
+    var far = pcg_fixture()
+
+    far.advance((1 << 100) + 12345)
+    check_u64s(&far, [0x3f03a364f20c7f4e, 0x746496daf0aa58b4][..])
+
+    var walked = pcg_fixture()
+    var jumped = pcg_fixture()
+
+    for i in 0..<1000
+        walked.next_u64()
+
+    jumped.advance(1000)
+    assert_eq(walked.next_u64(), 0x493a78394d9cf48a)
+    assert_eq(jumped.next_u64(), 0x493a78394d9cf48a)
+
+    var none = pcg_fixture()
+
+    none.advance(0)
+    assert_eq(none.next_u64(), 0x39b36fe73c3ff06e)
+
+// -- ChaCha ---------------------------------------------------------------------------------------
+
+private rfc_key() -> [32]u8
+    var k: [32]u8 = [0; 32]
+
+    for i in 0..<32
+        k[i] = u8(i)
+
+    k
+
+@test("the block function is RFC 8439 §2.3.2's, word for word")
+chacha_rfc_block()
+    val nonce: [12]u8 = [0, 0, 0, 0x09, 0, 0, 0, 0x4a, 0, 0, 0, 0]
+    val x = chacha20_block(rfc_key(), 1, nonce)
+    val want: [16]u32 = [
+        0xe4e7f110, 0x15593bd1, 0x1fdd0f50, 0xc47120a3, 0xc7f4d1c7, 0x0368c033, 0x9aaa2204, 0x4e6cd4c3,
+        0x466482d2, 0x09aa9f07, 0x05d7c214, 0xa2028bd9, 0xd19c12b5, 0xb94e16de, 0xe883d0cb, 0x4e3c50a2]
+
+    for i in 0..<16
+        assert_eq(x[i], want[i])
+
+@test("the cipher is RFC 8439 §2.4.2's: the sunscreen plaintext to its ciphertext, and back")
+chacha_rfc_cipher()
+    val nonce: [12]u8 = [0, 0, 0, 0, 0, 0, 0, 0x4a, 0, 0, 0, 0]
+    val text = "Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it."
+    var data: [114]u8 = [0; 114]
+
+    for i in 0..<114
+        data[i] = text.bytes[i]
+
+    chacha20_xor(rfc_key(), 1, nonce, data[..])
+
+    val want = hex_bytes("6e2e359a2568f98041ba0728dd0d6981e97e7aec1d4360c20a27afccfd9fae0bf91b65c5524733ab8f593dabcd62b3571639d624e65152ab8f530c359f0861d807ca0dbf500d6a6156a38e088a22b65e52bc514d16ccf806818ce91ab77937365af90bbf74a35be6b40b8eedf2785e42874d")
+
+    for i in 0..<114
+        assert_eq(data[i], want[i])
+
+    chacha20_xor(rfc_key(), 1, nonce, data[..])
+
+    for i in 0..<114
+        assert_eq(data[i], text.bytes[i])
+
+private keystream[const R: usize](key: [32]u8, stream: u64) -> [128]u8
+    var g = ChaCha[R].keyed(key, stream)
+    var out: [128]u8 = [0; 128]
+
+    g.fill(out[..])
+    out
+
+private same_bytes(got: [128]u8, want: [128]u8)
+    for i in 0..<128
+        assert_eq(got[i], want[i])
+
+@test("ChaCha8, 12 and 20 reproduce chacha-ref.c's keystream: zero key, stream 0, two blocks")
+chacha_ref_zero_key()
+    val zero: [32]u8 = [0; 32]
+
+    same_bytes(keystream[8](zero, 0), hex_bytes(CHACHA8_ZERO))
+    same_bytes(keystream[12](zero, 0), hex_bytes(CHACHA12_ZERO))
+    same_bytes(keystream[20](zero, 0), hex_bytes(CHACHA20_ZERO))
+
+@test("and with the key 00..1f on stream 7, which puts the stream in words 14 and 15")
+chacha_ref_stream_seven()
+    same_bytes(keystream[8](rfc_key(), 7), hex_bytes(CHACHA8_S7))
+    same_bytes(keystream[12](rfc_key(), 7), hex_bytes(CHACHA12_S7))
+    same_bytes(keystream[20](rfc_key(), 7), hex_bytes(CHACHA20_S7))
+
+@test("split is the same key on another stream, from block zero")
+chacha_split()
+    var g = ChaCha20.keyed(rfc_key(), 0)
+
+    g.next_u64()
+
+    var s = g.split(7)
+    var out: [128]u8 = [0; 128]
+
+    s.fill(out[..])
+    same_bytes(out, hex_bytes(CHACHA20_S7))
+    assert_eq(s.block_counter, 2)
+
+// -- Philox ---------------------------------------------------------------------------------------
+
+@test("Philox4x32-10 reproduces Random123's known answers")
+philox10_kat()
+    val a = philox4x32[10]([0, 0, 0, 0], [0, 0])
+    val b = philox4x32[10]([0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff], [0xffffffff, 0xffffffff])
+    val c = philox4x32[10]([0x243f6a88, 0x85a308d3, 0x13198a2e, 0x03707344], [0xa4093822, 0x299f31d0])
+    val wa: [4]u32 = [0x6627e8d5, 0xe169c58d, 0xbc57ac4c, 0x9b00dbd8]
+    val wb: [4]u32 = [0x408f276d, 0x41c83b0e, 0xa20bc7c6, 0x6d5451fd]
+    val wc: [4]u32 = [0xd16cfe09, 0x94fdcceb, 0x5001e420, 0x24126ea1]
+
+    for i in 0..<4
+        assert_eq(a[i], wa[i])
+        assert_eq(b[i], wb[i])
+        assert_eq(c[i], wc[i])
+
+@test("Philox4x32-7 reproduces Random123's known answers, so the round count is honoured")
+philox7_kat()
+    val a = philox4x32[7]([0, 0, 0, 0], [0, 0])
+    val c = philox4x32[7]([0x243f6a88, 0x85a308d3, 0x13198a2e, 0x03707344], [0xa4093822, 0x299f31d0])
+    val wa: [4]u32 = [0x5f6fb709, 0x0d893f64, 0x4f121f81, 0x4f730a48]
+    val wc: [4]u32 = [0x4dfccaba, 0x190a87f0, 0xc47362ba, 0xb6b5242a]
+
+    for i in 0..<4
+        assert_eq(a[i], wa[i])
+        assert_eq(c[i], wc[i])
+
+@test("the generator reads block n as two words, the counter carrying across 32-bit words")
+philox_generator_and_seek()
+    var g = Philox4x32.keyed(0)
+
+    assert_eq(g.next_u64(), 0xe169c58d6627e8d5)
+    assert_eq(g.next_u64(), 0x9b00dbd8bc57ac4c)
+
+    // Block 2^32 is counter [0, 1, 0, 0]: the carry out of word 0 has to arrive in word 1.
+    var walked = Philox4x32.keyed(77)
+
+    walked.seek(0xffffffff)
+    walked.next_u64()
+    walked.next_u64()
+
+    var direct = Philox4x32.keyed(77)
+
+    direct.seek(1 << 32)
+
+    val x = philox4x32[10]([0, 1, 0, 0], [77, 0])
+
+    assert_eq(walked.next_u64(), u64(x[0]) | u64(x[1]) << 32)
+    assert_eq(direct.next_u64(), u64(x[0]) | u64(x[1]) << 32)
+
+// -- Mersenne Twister -----------------------------------------------------------------------------
+
+@test("MT19937's 10000th output from the default seed is the C++ standard's 4123659995")
+mt32_standard()
+    var g = Mt19937.seeded(5489)
+
+    for i in 0..<9999
+        g.next_u32()
+
+    assert_eq(g.next_u32(), 4123659995)
+
+@test("MT19937-64's 10000th output from the default seed is the C++ standard's 9981545732273789042")
+mt64_standard()
+    var g = Mt19937_64.seeded(5489)
+
+    for i in 0..<9999
+        g.next_u64()
+
+    assert_eq(g.next_u64(), 9981545732273789042)
+
+@test("MT19937 from init_by_array reproduces mt19937ar.out, across the first twist")
+mt32_by_array()
+    var g = Mt19937.from_key([0x123, 0x234, 0x345, 0x456][..])
+    val want: [10]u32 = [1067595299, 955945823, 477289528, 4107218783, 4228976476, 3344332714, 3355579695, 227628506, 810200273, 2591290167]
+
+    for w in want
+        assert_eq(g.next_u32(), w)
+
+    for i in 10..<999
+        g.next_u32()
+
+    assert_eq(g.next_u32(), 3460025646)
+
+@test("MT19937-64 from init_by_array64 reproduces mt19937-64.out.txt, across the first twist")
+mt64_by_array()
+    var g = Mt19937_64.from_key([0x12345, 0x23456, 0x34567, 0x45678][..])
+
+    check_u64s(&g, [7266447313870364031, 4946485549665804864, 16945909448695747420, 16394063075524226720, 4873882236456199058][..])
+
+    for i in 5..<999
+        g.next_u64()
+
+    assert_eq(g.next_u64(), 994412663058993407)
+
+@test("MT19937's u64 is two draws, the first high")
+mt32_pairs()
+    var a = Mt19937.seeded(5489)
+    var b = Mt19937.seeded(5489)
+    val hi = u64(b.next_u32())
+    val lo = u64(b.next_u32())
+
+    assert_eq(a.next_u64(), hi << 32 | lo)
+
+// -- the authors' outputs, from their own code --------------------------------------------------
+
+// xoshiro256plusplus.c / xoshiro256starstar.c from s = [1, 2, 3, 4]: four draws after jump(), after
+// long_jump(), and from a state filled by four SplitMix64 draws from 42.
+private val XPP_JUMP: [4]u64 = [17043750140134683703, 2364973248208838314, 13951431646535487319, 8066193832155293345]
+private val XPP_LONG: [4]u64 = [13097851138432240629, 5869259491745178931, 2145365994275058833, 16694938170147227233]
+private val XPP_SEED42: [4]u64 = [15021278609987233951, 5881210131331364753, 18149643915985481100, 12933668939759105464]
+private val XSS_JUMP: [4]u64 = [13534147089533256664, 7126240192422241655, 3805973808039778091, 11547880530658420384]
+private val XSS_LONG: [4]u64 = [5942309088398569549, 15625447729937358436, 6925613901769781251, 16198770605655666946]
+private val XSS_SEED42: [4]u64 = [1546998764402558742, 6990951692964543102, 12544586762248559009, 17057574109182124193]
+
+// chacha-ref.c (eSTREAM), the round loop set to 8, 12 and 20: 128 keystream bytes under the zero key
+// on stream 0, and under the key 00..1f on stream 7 (the IV's first byte 7). The zero-key blocks are
+// also draft-strombergson-chacha-test-vectors' TC1.
+private val CHACHA8_ZERO = "3e00ef2f895f40d67f5bb8e81f09a5a12c840ec3ce9a7f3b181be188ef711a1e984ce172b9216f419f445367456d5619314a42a3da86b001387bfdb80e0cfe42d2aefa0deaa5c151bf0adb6c01f2a5adc0fd581259f9a2aadcf20f8fd566a26b5032ec38bbc5da98ee0c6f568b872a65a08abf251deb21bb4b56e5d8821e68aa"
+private val CHACHA12_ZERO = "9bf49a6a0755f953811fce125f2683d50429c3bb49e074147e0089a52eae155f0564f879d27ae3c02ce82834acfa8c793a629f2ca0de6919610be82f411326be0bd58841203e74fe86fc71338ce0173dc628ebb719bdcbcc151585214cc089b442258dcda14cf111c602b8971b8cc843e91e46ca905151c02744a6b017e69316"
+private val CHACHA20_ZERO = "76b8e0ada0f13d90405d6ae55386bd28bdd219b8a08ded1aa836efcc8b770dc7da41597c5157488d7724e03fb8d84a376a43b8f41518a11cc387b669b2ee65869f07e7be5551387a98ba977c732d080dcb0f29a048e3656912c6533e32ee7aed29b721769ce64e43d57133b074d839d531ed1f28510afb45ace10a1f4b794d6f"
+private val CHACHA8_S7 = "2eb833f3b4cdc1f0d0b7fb1159c024286506a9c3b74a2d56181136b7aedd195c483b2c862f96d105bfbf9d7a0ec06646fbb394c8a8616c13a76a6e2cd96ea71003efed7550daa2aaf4f5c604c5b98126302bd1d0c909ec2102b44669461dc2b860c3142af9ec8b5466888db86924593aeaa624232cd3861cbab066db9a351e77"
+private val CHACHA12_S7 = "3b98a191532438b177144dfdbd4ce68e1d1bb9a1f29f86c723fd4af76b4d723ae4b64d9b428815de3fa88b10d1e93fda0537a7634689ce9b43c115c45693ec320703ddb9fc6c2f3ccd2490e089f0b52d522f2e66fe22917d2af34c2ff7bd021b163c382cee85451fcbf4e5573240e885886c20dc0c888d7dd295bf35380ece21"
+private val CHACHA20_S7 = "480f443fe9dbb832560a751a4ff29af7147f999fdb769ab661f0eb73b36ce7c8ed24fee9481eb65eba4b4df7f80b0121e0112217e9ca1500f74bcc2075659477f10f844822e87a8962364e33fc88109a329da241f1ed0905aa9a33e7e7e9d71c102d9619cae7f319b91841e854e47a1ad46727ee0977d824ff630ca0ef553406"

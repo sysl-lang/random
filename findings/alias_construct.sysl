@@ -1,0 +1,16 @@
+// 0.13.1 (bug). reference/types.md § Type aliases: "a struct is constructed and read through the
+// alias". Through an alias of a fully applied generic it is not:
+//
+//     sysl run findings/alias_construct.sysl
+//     error: cannot infer the type argument 'N' of 'G' here — annotate the expected type
+//
+// Expected output: 5. Workaround taken in this package: construct through `G[3](5)`.
+
+struct G[const N: usize]
+    x: int
+
+type G3 = G[3]
+
+val g = G3(5)
+
+print(g.x)

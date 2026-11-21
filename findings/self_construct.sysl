@@ -1,0 +1,17 @@
+// 0.14.0 (gap). `Self` names the type inside its own members but is only a CONVERSION, never a
+// constructor, so a generic struct's members must spell their own type with its parameters
+// (`ChaCha[ROUNDS](input, buf, 8)`, `Philox[ROUNDS](...)`). No reference page promises `Self(...)`.
+//
+//     sysl run findings/self_construct.sysl
+//     error: a 'Self' conversion takes exactly one value
+//
+// And with one field, `Self(x)` is read as a conversion of `x` to the struct:
+//     error: cannot convert [4]ulong to sh.sysl.random.Xoshiro256[PlusPlus]
+
+struct P
+    x: int
+    y: int
+
+    make() -> Self = Self(1, 2)
+
+print(P.make().y)

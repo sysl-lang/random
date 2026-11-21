@@ -1,0 +1,27 @@
+// Random number generation for sysl: named, checkable generators -- SplitMix64, xoshiro256++/**,
+// PCG64 DXSM, ChaCha8/12/20, Philox4x32 and the Mersenne Twister in both widths -- and the
+// distributions over them, written once against one trait.
+//
+// This is the block a consumer writes to reach it:
+//
+//     dependencies {
+//       random { git = "github.com/sysl-lang/random", version = "0.1.0" }
+//     }
+//
+// The coordinate names the package, `random`; the module a program imports is `sh.sysl.random`. It
+// declares no dependencies of its own.
+
+package {
+  name    = "random"
+  version = "0.1.0"
+
+  // Built, tested and timed against 0.12.1.
+  sysl = "0.12.1"
+}
+
+// The benchmark (its own project, and the C it times), the table generator and the finding
+// reductions are built by hand, not as part of this package.
+exclude = ["bench", "tools", "findings"]
+
+// **No capability is asked for.** The generators and distributions allocate nothing and read no
+// clock, file or device: seeding is the caller's, so the package builds for a freestanding target.

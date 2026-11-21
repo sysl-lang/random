@@ -1,0 +1,119 @@
+import sh.sysl.random.*
+import sysl.hint.black_box
+import sysl.slices.as_ptr
+
+// The harness of bench/c/common.h, line for line: N outputs summed (wrapping) into a checksum, best of
+// REPS runs, the generator reset before each. The checksum is printed so the two runs are seen to
+// compute the same numbers.
+
+const N: u64 = 1 << 27
+const REPS = 7
+
+/** CLOCK_UPTIME_RAW, the clock the C half reads. */
+@needs(os)
+extern "clock_gettime_nsec_np" clock_ns(clock: u32) -> u64
+
+private now_ns() -> u64 = clock_ns(8)
+
+@needs(os)
+extern "write" c_write(fd: i32, buf: *u8, n: usize) -> isize
+
+/** Raw output on standard output, for `RNG_test stdin64`: until the reader closes the pipe. */
+stream[G: Rng](start: G)
+    var g = start
+    var buf: [65536]u8 = [0; 65536]
+
+    loop
+        g.fill(buf[..])
+
+        if c_write(1, as_ptr(buf[..]), buf.len) < 0 then return
+
+private report(name: string, best: real, check: u64) = print(f"$name ${best}%.4f $check")
+
+raw[G: Rng](name: string, start: G)
+    var best = 1e30
+    var check: u64 = 0
+
+    for rep in 0..<REPS
+        var g = start
+        var acc: u64 = 0
+        val t0 = now_ns()
+
+        for i in 0..<N
+            acc +%= g.next_u64()
+
+        val ns = real(now_ns() - t0) / real(N)
+
+        if ns < best then best = ns
+
+        check = acc
+
+    report(name, best, check)
+
+samplers(start: Xoshiro256pp, bound: u64)
+    var best = [1e30; 4]
+    var check: [4]u64 = [0; 4]
+
+    for rep in 0..<REPS
+        for k in 0..<4
+            var g = start
+            var acc: u64 = 0
+            val t0 = now_ns()
+
+            if k == 0
+                for i in 0..<N do acc +%= g.below(bound)
+            elif k == 1
+                for i in 0..<N do acc +%= g.unit().bits()
+            elif k == 2
+                for i in 0..<N do acc +%= g.normal().bits()
+            else
+                for i in 0..<N do acc +%= g.exponential().bits()
+
+            val ns = real(now_ns() - t0) / real(N)
+
+            if ns < best[k] then best[k] = ns
+
+            check[k] = acc
+
+    report("below", best[0], check[0])
+    report("unit", best[1], check[1])
+    report("normal", best[2], check[2])
+    report("exponential", best[3], check[3])
+end samplers
+
+main(args: []string)
+    var key: [32]u8 = [0; 32]
+
+    for i in 0..<32 do key[i] = u8(i)
+
+    val which = if args.len > 1 then args[1] else "all"
+
+    if which == "stream" && args.len > 2
+        val gen = args[2]
+
+        if gen == "splitmix64" then stream(SplitMix64(1))
+        if gen == "xoshiro256pp" then stream(Xoshiro256pp.seeded(1))
+        if gen == "xoshiro256ss" then stream(Xoshiro256ss.seeded(1))
+        if gen == "pcg64dxsm" then stream(Pcg64Dxsm.seeded(1, 0))
+        if gen == "chacha8" then stream(ChaCha8.keyed(key, 0))
+        if gen == "chacha12" then stream(ChaCha12.keyed(key, 0))
+        if gen == "chacha20" then stream(ChaCha20.keyed(key, 0))
+        if gen == "philox4x32" then stream(Philox4x32.keyed(1))
+        if gen == "mt19937" then stream(Mt19937.seeded(5489))
+        if gen == "mt19937_64" then stream(Mt19937_64.seeded(5489))
+        return
+
+    val all = which == "all"
+
+    if all || which == "splitmix64" then raw("splitmix64", SplitMix64(1))
+    if all || which == "xoshiro256pp" then raw("xoshiro256pp", Xoshiro256pp.seeded(1))
+    if all || which == "xoshiro256ss" then raw("xoshiro256ss", Xoshiro256ss.seeded(1))
+    if all || which == "pcg64dxsm" then raw("pcg64dxsm", Pcg64Dxsm(0x0123456789abcdef0011223344556677, 0x0f1e2d3c4b5a69788796a5b4c3d2e1f1))
+    if all || which == "chacha8" then raw("chacha8", ChaCha8.keyed(key, 0))
+    if all || which == "chacha12" then raw("chacha12", ChaCha12.keyed(key, 0))
+    if all || which == "chacha20" then raw("chacha20", ChaCha20.keyed(key, 0))
+    if all || which == "philox4x32" then raw("philox4x32", Philox4x32.keyed(1))
+    if all || which == "mt19937" then raw("mt19937", Mt19937.seeded(5489))
+    if all || which == "mt19937_64" then raw("mt19937_64", Mt19937_64.seeded(5489))
+    if all || which == "samplers" then samplers(Xoshiro256pp.seeded(1), black_box(1000000007))
+end main

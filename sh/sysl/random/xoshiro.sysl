@@ -1,0 +1,88 @@
+module sh.sysl.random
+@no_alloc
+
+/** Which of the two output functions a xoshiro256 generator applies to its state. */
+enum Scrambler
+    PlusPlus
+    StarStar
+
+/** xoshiro256++ and xoshiro256** (D. Blackman and S. Vigna, *Scrambled Linear Pseudorandom Number
+ * Generators*, ACM TOMS 47(4), 2021), with the authors' `jump` and `long_jump`.
+ *
+ * **One linear engine, two scramblers.** The state is four words stepped by shifts, xors and one
+ * rotation -- a linear map over GF(2) with period 2^256 - 1 -- and the two generators differ only in
+ * how a word is read out of it: `++` is `rotl(s0 + s3, 23) + s0`, `**` is `rotl(s1 * 5, 7) * 9`. So
+ * the scrambler is a value parameter, and each instance keeps exactly one of them.
+ *
+ * **The all-zero state is the one fixed point**, and a generator started there answers zero for
+ * ever. `seeded` fills the state through SplitMix64, as the authors recommend, which cannot produce
+ * four zero words from any seed.
+ */
+struct Xoshiro256[const S: Scrambler]
+    s: [4]u64
+
+    /** A generator whose state is four SplitMix64 draws from `seed`. */
+    seeded(seed: u64) -> Self
+        var sm = SplitMix64(seed)
+
+        Xoshiro256[S]([sm.next_u64(), sm.next_u64(), sm.next_u64(), sm.next_u64()])
+
+    /** Advance by 2^128 draws: the next of 2^128 non-overlapping streams, each 2^128 long. */
+    jump(*self) = self.apply([0x180ec6d33cfd0aba, 0xd5a61266f0c9392c, 0xa9582618e03fc9aa, 0x39abdc4529b1661c])
+
+    /** Advance by 2^192 draws: the next of 2^64 starting points, each of which `jump` divides again. */
+    long_jump(*self) = self.apply([0x76e15d3efefdcbbf, 0xc5004e441c522fb3, 0x77710069854ee241, 0x39109bb02acbe635])
+
+    /** A generator for another thread: this one as it stands, while this one moves on by 2^128.
+     * Calling it k times hands out k streams that cannot overlap for 2^128 draws each.
+     */
+    split(*self) -> Self
+        val out = *self
+
+        self.jump()
+        out
+
+    /** The state times the jump polynomial: accumulate the state at every set bit, stepping once per
+     * bit. The authors' loop, word for word.
+     */
+    private apply(*self, poly: [4]u64)
+        var acc: [4]u64 = [0; 4]
+
+        for w in poly
+            for b in 0..<64
+                if w >> b & 1 == 1
+                    for k in 0..<4
+                        acc[k] ^= self.s[k]
+
+                self.step()
+
+        self.s = acc
+    end apply
+
+    /** The linear engine: one step of the state, with no output. */
+    private step(*self)
+        val t = self.s[1] << 17
+
+        self.s[2] ^= self.s[0]
+        self.s[3] ^= self.s[1]
+        self.s[1] ^= self.s[2]
+        self.s[0] ^= self.s[3]
+        self.s[2] ^= t
+        self.s[3] = self.s[3].rotate_left(45)
+end Xoshiro256
+
+type Xoshiro256pp = Xoshiro256[PlusPlus]
+type Xoshiro256ss = Xoshiro256[StarStar]
+
+impl[const S: Scrambler] Rng for Xoshiro256[S]
+    next_u64(*self) -> u64
+        // Both arms type-check at both scramblers, so a plain `if` over the value parameter is
+        // enough; it folds in each instance. (`if const` here is refused: see the README's findings.)
+        val result =
+            if S == PlusPlus
+                (self.s[0] +% self.s[3]).rotate_left(23) +% self.s[0]
+            else
+                (self.s[1] *% 5).rotate_left(7) *% 9
+
+        self.step()
+        result

@@ -1,0 +1,163 @@
+module sh.sysl.random
+@no_alloc
+
+/** "expand 32-byte k", the four words every ChaCha block with a 256-bit key starts from. */
+private val SIGMA: [4]u32 = [0x61707865, 0x3320646e, 0x79622d32, 0x6b206574]
+
+/** The ChaCha permutation of one 16-word block, then the feed-forward that makes it one-way:
+ * `ROUNDS` rounds (a column round and a diagonal round per pair), and the input added back word by
+ * word. With `ROUNDS = 20` this is RFC 8439 §2.3's block function exactly; 8 and 12 are Bernstein's
+ * reduced-round variants, which keep the same structure.
+ */
+chacha_core[const ROUNDS: usize](input: [16]u32) -> [16]u32
+    var x = input
+
+    for r in 0..<ROUNDS / 2
+        quarter(&x, 0, 4, 8, 12)
+        quarter(&x, 1, 5, 9, 13)
+        quarter(&x, 2, 6, 10, 14)
+        quarter(&x, 3, 7, 11, 15)
+        quarter(&x, 0, 5, 10, 15)
+        quarter(&x, 1, 6, 11, 12)
+        quarter(&x, 2, 7, 8, 13)
+        quarter(&x, 3, 4, 9, 14)
+
+    for i in 0..<16
+        x[i] +%= input[i]
+
+    x
+end chacha_core
+
+/** RFC 8439 §2.1's quarter round, on four words of a block. */
+private quarter(x: *[16]u32, a: usize, b: usize, c: usize, d: usize)
+    x[a] +%= x[b]
+    x[d] = (x[d] ^ x[a]).rotate_left(16)
+    x[c] +%= x[d]
+    x[b] = (x[b] ^ x[c]).rotate_left(12)
+    x[a] +%= x[b]
+    x[d] = (x[d] ^ x[a]).rotate_left(8)
+    x[c] +%= x[d]
+    x[b] = (x[b] ^ x[c]).rotate_left(7)
+
+/** A word read from four bytes, least significant first -- how RFC 8439 reads a key and a nonce. */
+private le32(b: []const u8, at: usize) -> u32 =
+    u32(b[at]) | u32(b[at + 1]) << 8 | u32(b[at + 2]) << 16 | u32(b[at + 3]) << 24
+
+/** RFC 8439 §2.3's block function: a 32-byte key, a 32-bit block counter and a 12-byte nonce, laid
+ * out as the RFC lays them out, and the twenty-round block over them.
+ */
+chacha20_block(key: [32]u8, counter: u32, nonce: [12]u8) -> [16]u32
+    var input: [16]u32 = [0; 16]
+
+    for i in 0..<4
+        input[i] = SIGMA[i]
+
+    for i in 0..<8
+        input[4 + i] = le32(key[..], 4 * i)
+
+    input[12] = counter
+
+    for i in 0..<3
+        input[13 + i] = le32(nonce[..], 4 * i)
+
+    chacha_core[20](input)
+end chacha20_block
+
+/** RFC 8439 §2.4's cipher: the bytes xored, in place, with the keystream of successive blocks from
+ * `counter` on. Encryption and decryption are the same call.
+ */
+chacha20_xor(key: [32]u8, counter: u32, nonce: [12]u8, data: []u8)
+    var n = counter
+    var at: usize = 0
+
+    while at < data.len
+        val block = chacha20_block(key, n, nonce)
+        var k: usize = 0
+
+        while k < 64 && at < data.len
+            data[at] ^= u8.wrap(block[k / 4] >> (8 * u32(k % 4)))
+            at += 1
+            k += 1
+
+        n +%= 1
+end chacha20_xor
+
+/** ChaCha as a generator (D. J. Bernstein, *ChaCha, a variant of Salsa20*, 2008), in Bernstein's
+ * original layout: the 256-bit key, a **64-bit block counter** in words 12 and 13, and a **64-bit
+ * stream** in words 14 and 15. That is the layout of `rand_chacha` and of the reference `chacha.c`,
+ * and it gives every key 2^64 streams of 2^64 blocks.
+ *
+ * **This is the cryptographically secure generator here** -- at 20 rounds, and at 12 with a wide
+ * margin; 8 rounds is the fast end that still has no known distinguisher. Its outputs reveal nothing
+ * of the key, so it is the one to seed from an entropy source and draw keys, tokens and nonces from.
+ *
+ * Each block gives sixteen words, read two at a time as eight `u64`s, the earlier word low.
+ */
+struct ChaCha[const ROUNDS: usize]
+    input: [16]u32
+    buf: [8]u64
+    at: usize
+
+    /** A generator over a 32-byte key and a stream number, starting at block zero. */
+    keyed(key: [32]u8, stream: u64) -> Self
+        var input: [16]u32 = [0; 16]
+
+        for i in 0..<4
+            input[i] = SIGMA[i]
+
+        for i in 0..<8
+            input[4 + i] = le32(key[..], 4 * i)
+
+        input[14] = u32.wrap(stream)
+        input[15] = u32(stream >> 32)
+        ChaCha[ROUNDS](input, [0; 8], 8)
+
+    /** A generator keyed from one word: the key is four SplitMix64 draws. Convenient for a simulation
+     * that wants ChaCha's quality; **not** a way to get unpredictability, which needs a key that is.
+     */
+    seeded(seed: u64) -> Self
+        var sm = SplitMix64(seed)
+        var key: [32]u8 = [0; 32]
+
+        sm.fill(key[..])
+        Self.keyed(key, 0)
+
+    /** The same key on another stream: 2^64 of them, none overlapping, each one a thread's. */
+    split(*self, stream: u64) -> Self
+        var g = *self
+
+        g.input[12] = 0
+        g.input[13] = 0
+        g.input[14] = u32.wrap(stream)
+        g.input[15] = u32(stream >> 32)
+        g.at = 8
+        g
+
+    /** Where the next block starts: blocks generated so far, as a 64-bit count. */
+    block_counter -> u64 = u64(self.input[12]) | u64(self.input[13]) << 32
+
+    private refill(*self)
+        val x = chacha_core[ROUNDS](self.input)
+
+        for i in 0..<8
+            self.buf[i] = u64(x[2 * i]) | u64(x[2 * i + 1]) << 32
+
+        self.input[12] +%= 1
+
+        if self.input[12] == 0 then self.input[13] +%= 1
+
+        self.at = 0
+end ChaCha
+
+type ChaCha8 = ChaCha[8]
+type ChaCha12 = ChaCha[12]
+type ChaCha20 = ChaCha[20]
+
+impl[const ROUNDS: usize] Rng for ChaCha[ROUNDS]
+    next_u64(*self) -> u64
+        if self.at == 8 then self.refill()
+
+        val v = self.buf[self.at]
+
+        self.at += 1
+        v

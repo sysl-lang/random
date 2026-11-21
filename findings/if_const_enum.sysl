@@ -1,0 +1,24 @@
+// 0.13.1 (bug). reference/generics.md § Which values admits a simple enum's variants as a value
+// parameter, and § `if const` takes "a value parameter ... or folded arithmetic over them". Comparing
+// an enum value parameter with a variant is refused:
+//
+//     sysl run findings/if_const_enum.sysl
+//     error: an 'if const' is decided while compiling, so its condition has to be known then — a
+//     'const', a value parameter, or a call whose body can run. ...
+//
+// Expected output: 1 2. Workaround taken in xoshiro.sysl: a plain `if` (both arms type-check there).
+
+enum Mode
+    A
+    B
+
+struct W[const M: Mode]
+    v: int
+
+    get(self) -> int
+        if const M == A
+            1
+        else
+            2
+
+print(W[A](0).get(), W[B](0).get())
